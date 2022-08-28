@@ -1,6 +1,0 @@
-marker 4.0 2.0
-marker 0.0 0.0
-marker 8 6
-end_tempo 2.25
-b2s 2.0
-s2b 6.0

@@ -11,8 +11,43 @@
  * @param start_and_end_markers list of two warp markers surrounding the value to be converted
  * @return the tempo between the two warp markers
  */
-double WarpMarker::calculate_tempo_between_markers(WarpMarker **start_and_end_markers) {
-    return (start_and_end_markers[1]->beat_time - start_and_end_markers[0]->beat_time)/(start_and_end_markers[1]->sample_time - start_and_end_markers[0]->sample_time);
+double WarpMarker::calculate_tempo_between_markers(WarpMarker *start_marker, WarpMarker *end_marker) {
+    return (end_marker->beat_time - start_marker->beat_time)/(end_marker->sample_time - start_marker->sample_time);
+}
+
+/**
+ * Gets the tempo at the given location
+ * @param time user defined time
+ * @param time_type True = beat time, False = sample time
+ * @param warp_marker_list list of warp markers
+ * @param end_tempo tempo after the last warp marker in case `time` comes after all warp markers
+ * @return the tempo at the given time
+ */
+double WarpMarker::tempo_at(double time, bool time_type, std::vector<WarpMarker> &warp_marker_list, double end_tempo) {
+    // Should not happen for valid command inputs
+    if (warp_marker_list.empty()) {
+        return 0.0;
+    } // Now warp_marker_list length is >= 1
+
+    // Get the warp markers around time
+    WarpMarker *start_marker, *end_marker;
+    std::tie(start_marker, end_marker) = locate_warp_markers(time,
+                                                             time_type,
+                                                             warp_marker_list);
+    if (start_marker == nullptr) {
+        // Have to get the tempo between first and second warp markers
+        if (warp_marker_list.size() == 1)
+            // Can't get tempo with 1 marker so use end_tempo
+            return end_tempo;
+
+        start_marker = &warp_marker_list.at(0);
+        end_marker = &warp_marker_list.at(1);
+        return calculate_tempo_between_markers(start_marker, end_marker);
+    } else if (end_marker == nullptr) {
+        return end_tempo;
+    } else {
+        return (end_marker->beat_time - start_marker->beat_time) / (end_marker->sample_time - start_marker->sample_time);
+    }
 }
 
 /**
@@ -25,24 +60,18 @@ double WarpMarker::calculate_tempo_between_markers(WarpMarker **start_and_end_ma
  */
 double WarpMarker::b2s(double beats, std::vector<WarpMarker> &warp_marker_list, double end_tempo) {
     // Locate what two warp markers the beat time is located between and return them
-    static WarpMarker **start_and_end_markers = locate_warp_marker(beats, true,warp_marker_list);
+    WarpMarker *start_marker, *end_marker;
+    std::tie(start_marker, end_marker) = locate_warp_markers(beats,
+                                                             true,
+                                                             warp_marker_list);
 
-    // Only one warp marker in timeline, so just
-    // use end_tempo to convert
-    if (start_and_end_markers[0] == nullptr)
-        return beats * (1/end_tempo);
+    double tempo = tempo_at(beats, true, warp_marker_list, end_tempo);
 
-    // Beat is after last warp marker and there are
-    // multiple warp markers in timeline, so use end tempo
-    // and last warp marker to convert
-    if (start_and_end_markers[1] == nullptr)
-        return start_and_end_markers[0]->sample_time + (beats - start_and_end_markers[0]->beat_time) * (1/end_tempo);
+    // Beats comes before all markers
+    if (start_marker == nullptr)
+        return end_marker->sample_time - (end_marker->beat_time - beats) * (1/tempo);
 
-    // Calculate tempo between two warp markers beat is in between
-    double tempo = calculate_tempo_between_markers(start_and_end_markers);
-
-    // Calculate beat to seconds
-    return (beats - start_and_end_markers[0]->beat_time) * (1/tempo) + start_and_end_markers[0]->sample_time;
+    return (beats - start_marker->beat_time) * (1/tempo) + start_marker->sample_time;
 }
 
 /**
@@ -54,74 +83,75 @@ double WarpMarker::b2s(double beats, std::vector<WarpMarker> &warp_marker_list, 
  * @return conversion of seconds to beats
  */
 double WarpMarker::s2b(double seconds, std::vector<WarpMarker> &warp_marker_list, double end_tempo) {
-    // Locate what two warp markers the sample time is located between and return them
-    static WarpMarker **start_and_end_markers = locate_warp_marker(seconds, false,warp_marker_list);
+    // Locate and return the 2 warp markers the sample time is located between
+    WarpMarker *start_marker, *end_marker;
+    std::tie(start_marker, end_marker) = locate_warp_markers(seconds,
+                                                             false,
+                                                             warp_marker_list);
 
-    // Only one warp marker in timeline, so just
-    // use end_tempo to convert
-    if (start_and_end_markers[0] == nullptr)
-        return seconds * end_tempo;
+    double tempo = tempo_at(seconds, false, warp_marker_list, end_tempo);
 
-    // Beat is after last warp marker and there are
-    // multiple warp markers in timeline, so use end tempo
-    // and last warp marker to convert
-    if (start_and_end_markers[1] == nullptr)
-        return start_and_end_markers[0]->beat_time + (seconds - start_and_end_markers[0]->sample_time) * end_tempo;
+    // Seconds comes before all markers
+    if (start_marker == nullptr)
+        return end_marker-> beat_time - (end_marker->sample_time - seconds) * (tempo);
 
-    // Calculate tempo between two warp markers seconds is in between
-    double tempo = calculate_tempo_between_markers(start_and_end_markers);
-
-    // Calculate seconds to beats
-    return (seconds - start_and_end_markers[0]->sample_time) * (tempo) + start_and_end_markers[0]->beat_time;
+    return (seconds - start_marker->sample_time) * tempo + start_marker->beat_time;
 }
 
 /**
- * Find what warp markers the time to convert is between
+ * Find the warp markers before and after the time to convert, or `nullptr` if there is not one.
+ * If the time is on a warp marker, that warp marker is the "before" marker.
  *
- * @param time_to_convert user defined time to convert
- * @param time_type either True for beat time to convert or False for sample time to convert
+ * @param time_to_convert time to convert (either beats or seconds)
+ * @param time_type True = beat time, False = sample time
  * @param warp_marker_list list of warp markers
- * @return list of two warp markers the time is between
+ * @return pointers to the two `WarpMarker`s that the time is between, or
+ *         `nullptr` if `time_to_convert` is before/after all warp markers
  */
-WarpMarker** WarpMarker::locate_warp_marker(double time_to_convert, bool time_type, std::vector<WarpMarker> &warp_marker_list) {
-    WarpMarker end_warp_marker {};
-    WarpMarker start_warp_marker {};
-    static WarpMarker *start_and_end_markers[2] = {&start_warp_marker, &end_warp_marker};
+std::tuple<WarpMarker*, WarpMarker*> WarpMarker::locate_warp_markers(double time_to_convert,
+                                                                     bool time_type,
+                                                                     std::vector<WarpMarker> &warp_marker_list) {
+    static WarpMarker *start_marker = nullptr;
+    static WarpMarker *end_marker = nullptr;
 
-    // If there is only one warp marker, assign null
-    // This signals to only use end tempo for conversion
-    if (warp_marker_list.size() == 1) {
-        start_and_end_markers[0] = nullptr;
-        return start_and_end_markers;
+    // No warp markers are given, start and end should be nullptr
+    // Should never happen on valid input commands
+    if (warp_marker_list.empty()) {
+        return std::make_tuple(start_marker, end_marker);
+    }
+
+    // Time comes before first warp marker
+    if ((time_type && warp_marker_list.front().beat_time > time_to_convert)
+            || (!time_type && warp_marker_list.front().sample_time > time_to_convert)){
+        // Start is nullptr, set end
+        end_marker = &warp_marker_list.front();
+        return std::make_tuple(start_marker, end_marker);
+    }
+    // Time comes after last warp marker
+    else if ((time_type && warp_marker_list.back().beat_time <= time_to_convert)
+            || (!time_type && warp_marker_list.back().sample_time <= time_to_convert)) {
+        // Set start, end is nullptr
+        start_marker = &warp_marker_list.back();
+        return std::make_tuple(start_marker, end_marker);
     }
 
     // Iterates through warp marker list to find two warp markers time to convert is between
     for (int i = 0; i < warp_marker_list.size(); i++) {
-
-        // True: Use beat time to find where beat is within timeline
-        if (time_type) {
+        if (time_type) {  // b2s
             // Finds start and end warp marker surrounding seconds on timeline
-            if (warp_marker_list.at(i).beat_time >= time_to_convert) {
-                start_and_end_markers[1] = &warp_marker_list.at(i); // End warp marker
-                start_and_end_markers[0] = &warp_marker_list.at(i - 1); // Start warp marker
-                return start_and_end_markers;
+            if (warp_marker_list.at(i).beat_time > time_to_convert) {
+                start_marker = &warp_marker_list.at(i - 1);
+                end_marker = &warp_marker_list.at(i);
+                return std::make_tuple(start_marker, end_marker);
             }
-        }
-
-        // False: Use sample time to find where seconds are within timeline
-        else {
+        } else {  // s2b
             // Finds start and end warp marker surrounding seconds on timeline
-            if (warp_marker_list.at(i).sample_time >= time_to_convert) {
-                start_and_end_markers[1] = &warp_marker_list.at(i); // End warp marker
-                start_and_end_markers[0] = &warp_marker_list.at(i - 1); // Start warp marker
-                return start_and_end_markers;
+            if (warp_marker_list.at(i).sample_time > time_to_convert) {
+                start_marker = &warp_marker_list.at(i - 1);
+                end_marker = &warp_marker_list.at(i);
+                return std::make_tuple(start_marker, end_marker);
             }
         }
     }
-
-    // If time to convert is after all warp markers, assign last warp marker and null
-    // This signals to use last warp marker and end tempo for conversion
-    start_and_end_markers[0] = &warp_marker_list.at(warp_marker_list.size() - 1);
-    start_and_end_markers[1] = nullptr;
-    return start_and_end_markers;
+    // Should never reach here
 }
